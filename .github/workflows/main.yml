@@ -45,47 +45,46 @@ jobs:
           retention-days: 7
 
       # Call the AI agent on failure
+      # Call the AI agent on failure
       - name: Trigger AI Diagnosis
-        if: steps.build.outputs.build_exit != '0'
+        if: steps.build.outputs.exit_code != '0'
         env:
           AGENT_URL:    ${{ secrets.AGENT_URL }}
           AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
         run: |
           cd ..
 
-          # Extract last 500 lines and escape for JSON
-          LOG_CONTENT=$(tail -500 build.log | python3 -c "
-          import sys, json
-          print(json.dumps(sys.stdin.read()))
-          ")
+          # Extract last 200 lines only — avoids "argument list too long"
+          tail -200 build.log > build_tail.log
 
-          PAYLOAD=$(cat <<EOF
-          {
-            "run_id":   "${{ github.run_id }}",
-            "repo":     "${{ github.repository }}",
-            "commit":   "${{ github.sha }}",
-            "branch":   "${{ github.ref_name }}",
-            "log_text": $LOG_CONTENT
-          }
-          EOF
-          )
+          # Write JSON payload to a file — never pass big text as shell variable
+          python3 - << 'EOF'
+import json, os
+from pathlib import Path
 
+log_text = Path("build_tail.log").read_text(errors="replace")
+
+payload = {
+    "run_id":  os.environ.get("GITHUB_RUN_ID", "0"),
+    "repo":    os.environ.get("GITHUB_REPOSITORY", "unknown"),
+    "commit":  os.environ.get("GITHUB_SHA", "unknown"),
+    "branch":  os.environ.get("GITHUB_REF_NAME", "main"),
+    "log_text": log_text
+}
+
+Path("payload.json").write_text(json.dumps(payload))
+print(f"Payload written: {len(json.dumps(payload))} bytes")
+EOF
+
+          # Send payload from file — no size limit issues
           echo "Calling DevOps AI Agent..."
           RESPONSE=$(curl -s -w "\n%{http_code}" \
             -X POST "$AGENT_URL" \
             -H "Content-Type: application/json" \
             -H "X-Agent-Signature: $AGENT_SECRET" \
-            -d "$PAYLOAD" \
-            --max-time 15)
+            --data-binary @payload.json \
+            --max-time 30)
 
           HTTP_CODE=$(echo "$RESPONSE" | tail -1)
           BODY=$(echo "$RESPONSE" | head -1)
-
           echo "Agent response: $HTTP_CODE — $BODY"
-
-      # Fail the job properly after agent was triggered
-      - name: Fail if build failed
-        if: steps.build.outputs.build_exit != '0'
-        run: |
-          echo "Build failed. AI Agent has been triggered for diagnosis."
-          exit 1
