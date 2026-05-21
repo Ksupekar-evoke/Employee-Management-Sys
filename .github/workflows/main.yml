@@ -2,10 +2,6 @@ name: Build Spring Boot Application
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["**"]
-  pull_request:
-    branches: [main, develop]
 
 jobs:
   build:
