@@ -12,7 +12,7 @@ import org.springframework.web.bind.annotation.CrossOrigin;
 
 import java.util.List;
 
-@RestControll
+@RestController
 @CrossOrigin("*")
 @RequestMapping("api/employee")
 
