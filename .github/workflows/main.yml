@@ -2,11 +2,14 @@ name: Build Spring Boot Application
 
 on:
   workflow_dispatch:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main, develop]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     defaults:
       run:
         working-directory: EmployeeManagementSystem
@@ -21,11 +24,72 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Build Application (Skip Tests)
-        run: mvn clean package -DskipTests
+      # Build and capture full output to build.log
+      - name: Build Application
+        id: build
+        run: |
+          mvn clean package -DskipTests 2>&1 | tee ../build.log
+          echo "build_exit=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
 
       - name: Upload JAR Artifact
+        if: steps.build.outputs.build_exit == '0'
         uses: actions/upload-artifact@v4
         with:
           name: spring-boot-jar
           path: EmployeeManagementSystem/target/*.jar
+
+      # Upload log as artifact (always — useful for debugging)
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_id }}
+          path: build.log
+          retention-days: 7
+
+      # Call the AI agent on failure
+      - name: Trigger AI Diagnosis
+        if: steps.build.outputs.build_exit != '0'
+        env:
+          AGENT_URL:    ${{ secrets.AGENT_URL }}
+          AGENT_SECRET: ${{ secrets.AGENT_SECRET }}
+        run: |
+          cd ..
+
+          # Extract last 500 lines and escape for JSON
+          LOG_CONTENT=$(tail -500 build.log | python3 -c "
+          import sys, json
+          print(json.dumps(sys.stdin.read()))
+          ")
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "run_id":   "${{ github.run_id }}",
+            "repo":     "${{ github.repository }}",
+            "commit":   "${{ github.sha }}",
+            "branch":   "${{ github.ref_name }}",
+            "log_text": $LOG_CONTENT
+          }
+          EOF
+          )
+
+          echo "Calling DevOps AI Agent..."
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "$AGENT_URL" \
+            -H "Content-Type: application/json" \
+            -H "X-Agent-Signature: $AGENT_SECRET" \
+            -d "$PAYLOAD" \
+            --max-time 15)
+
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -1)
+
+          echo "Agent response: $HTTP_CODE — $BODY"
+
+      # Fail the job properly after agent was triggered
+      - name: Fail if build failed
+        if: steps.build.outputs.build_exit != '0'
+        run: |
+          echo "Build failed. AI Agent has been triggered for diagnosis."
+          exit 1
